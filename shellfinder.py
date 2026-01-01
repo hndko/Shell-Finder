@@ -53,19 +53,76 @@ def get_arguments():
 
     return options
 
-def check_url(target_url, path, timeout=5):
+
+# Global variable for soft 404 content length/signature
+SOFT_404_SIGNATURE = None
+SOFT_404_TOLERANCE = 10  # Bytes tolerance for soft 404 length
+
+def calibrate_soft_404(target_url):
+    """
+    Checks if the server returns 200 OK for a non-existent URL.
+    Returns the content length if it does (Soft 404), otherwise None.
+    """
+    random_path =  ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=12)) + ".php"
+    full_url = f"{target_url}/{random_path}" if not target_url.endswith('/') else f"{target_url}{random_path}"
+
+    print(f"{Colors.YELLOW}[*] Calibrating for Soft 404 errors... ({full_url}){Colors.RESET}")
+
+    try:
+        req = urllib.request.Request(
+            full_url,
+            headers={'User-Agent': random.choice(USER_AGENTS)}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if response.getcode() == 200:
+                content = response.read()
+                print(f"{Colors.RED}[!] WARNING: Server returns 200 for invalid URLs (Soft 404 Detected).{Colors.RESET}")
+                print(f"{Colors.RED}[!] Auto-ignoring pages with size difference < {SOFT_404_TOLERANCE} bytes from the error page.{Colors.RESET}")
+                return len(content)
+    except Exception:
+        pass
+
+    print(f"{Colors.GREEN}[*] Server seems to handle 404 correctly.{Colors.RESET}")
+    return None
+
+def check_url(target_url, path, timeout=10):
     full_url = f"{target_url}/{path}" if not target_url.endswith('/') else f"{target_url}{path}"
+
     try:
         req = urllib.request.Request(
             full_url,
             headers={'User-Agent': random.choice(USER_AGENTS)}
         )
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            if response.getcode() == 200:
+            code = response.getcode()
+            if code == 200:
+                content = response.read()
+                content_len = len(content)
+
+                # Check 1: Soft 404 by length
+                if SOFT_404_SIGNATURE is not None:
+                    if abs(content_len - SOFT_404_SIGNATURE) < SOFT_404_TOLERANCE:
+                        return (False, full_url)
+
+                # Check 2: Keyword detection in body (common 404 text even with 200 OK)
+                # Decode safely
+                try:
+                    body_str = content.decode('utf-8', errors='ignore').lower()
+                except:
+                    body_str = ""
+
+                error_keywords = [
+                    "not found", "error 404", "halaman tidak ditemukan",
+                    "page not found", "does not exist", "404 not found"
+                ]
+
+                if any(keyword in body_str for keyword in error_keywords):
+                    return (False, full_url)
+
                 return (True, full_url)
-    except urllib.error.HTTPError as e:
-        if e.code == 200: # Sometimes HTTPError can still return 200? unlikely but safe
-             return (True, full_url)
+
+    except urllib.error.HTTPError:
+        pass
     except urllib.error.URLError:
         pass
     except Exception:
@@ -81,6 +138,10 @@ def main():
     print(f"\n{Colors.BLUE}[*] Target: {target_url}{Colors.RESET}")
     print(f"{Colors.BLUE}[*] Threads: {options.threads}{Colors.RESET}")
     print(f"{Colors.BLUE}[*] Wordlist: {options.wordlist}{Colors.RESET}")
+
+    # 1. Calibrate Soft 404
+    global SOFT_404_SIGNATURE
+    SOFT_404_SIGNATURE = calibrate_soft_404(target_url)
 
     try:
         with open(options.wordlist, "r") as f:
@@ -103,7 +164,6 @@ def main():
                 if is_found:
                     print(f"{Colors.GREEN}[+] FOUND: {url}{Colors.RESET}")
                     found_shells.append(url)
-                    # Optional: Write to log immediately
                 else:
                     # Overwrite line to show progress
                     sys.stdout.write(f"\r{Colors.YELLOW}[~] Scanning... {url[:50].ljust(50)}{Colors.RESET}")
@@ -111,6 +171,7 @@ def main():
 
     except KeyboardInterrupt:
         print(f"\n{Colors.RED}[!] Scan interrupted by user.{Colors.RESET}")
+        exit_event = True
         sys.exit(0)
 
     print(f"\n\n{Colors.CYAN}|------------------------------------------------------------------------------|{Colors.RESET}")
